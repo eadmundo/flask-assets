@@ -2,17 +2,19 @@ from __future__ import with_statement
 from os import path
 from flask import _request_ctx_stack, url_for
 from webassets.env import BaseEnvironment, ConfigStorage, env_options
+#from webassets.ext.jinja2 import static_asset
 
 
 __version__ = (0, 7)
 __webassets_version__ = (0, 7) # webassets core compatibility. used in setup.py
 
 
-__all__ = ('Environment', 'Bundle',)
+__all__ = ('Environment', 'Bundle', 'ExternalAssets',)
 
 
 # We want to expose this here.
 from webassets import Bundle
+from webassets import ExternalAssets
 
 
 class FlaskConfigStorage(ConfigStorage):
