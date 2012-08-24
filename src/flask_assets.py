@@ -1,25 +1,46 @@
 from __future__ import with_statement
 from os import path
 from flask import _request_ctx_stack, url_for
-from webassets.env import BaseEnvironment, ConfigStorage, env_options
-#from webassets.ext.jinja2 import static_asset
+from flask.templating import render_template_string
+from webassets.env import (\
+    BaseEnvironment, ConfigStorage, env_options, Resolver, url_prefix_join)
+from webassets.filter import Filter, register_filter
+from webassets.loaders import PythonLoader, YAMLLoader
 
 
-__version__ = (0, 7)
-__webassets_version__ = (0, 7) # webassets core compatibility. used in setup.py
+__version__ = (0, 8, 'dev')
+__webassets_version__ = ('dev',) # webassets core compatibility. used in setup.py
 
 
-__all__ = ('Environment', 'Bundle', 'ExternalAssets',)
+__all__ = ('Environment', 'Bundle',)
 
 
 # We want to expose this here.
 from webassets import Bundle
-from webassets import ExternalAssets
+
+
+class Jinja2Filter(Filter):
+    """Will compile all source files as Jinja2 temlates using the standard
+    Flask contexts.
+    """
+    name = 'jinja2'
+
+    def __init__(self, context=None):
+        super(Jinja2Filter, self).__init__()
+        self.context = context or {}
+
+    def input(self, _in, out, source_path, output_path, **kw):
+        out.write(render_template_string(_in.read(), **self.context))
+
+# Override the built-in ``jinja2`` filter that ships with ``webassets``. This
+# custom filter uses Flask's ``render_template_string`` function to provide all
+# the standard Flask template context variables.
+register_filter(Jinja2Filter)
 
 
 class FlaskConfigStorage(ConfigStorage):
     """Uses the config object of a Flask app as the backend: either the app
-    instance bound to the extension directly, or the current Flasp app on
+    instance bound to the extension directly, or the current Flask app on
     the stack.
 
     Also provides per-application defaults for some values.
@@ -85,7 +106,6 @@ class FlaskConfigStorage(ConfigStorage):
         del self.env._app.config[self._transform_key(key)]
 
 
-
 def get_static_folder(app_or_blueprint):
     """Return the static folder of the given Flask app
     instance, or module/blueprint.
@@ -98,9 +118,90 @@ def get_static_folder(app_or_blueprint):
     return path.join(app_or_blueprint.root_path, 'static')
 
 
+class FlaskResolver(Resolver):
+    """Support Flask blueprints."""
+
+    def split_prefix(self, item):
+        """See if ``item`` has blueprint prefix, return (directory, rel_path).
+        """
+        try:
+            if hasattr(self.env._app, 'blueprints'):
+                blueprint, name = item.split('/', 1)
+                directory = get_static_folder(self.env._app.blueprints[blueprint])
+                item = name
+            else:
+                # Module support for Flask < 0.7
+                module, name = item.split('/', 1)
+                directory = get_static_folder(self.env._app.modules[module])
+                item = name
+        except (ValueError, KeyError):
+            directory = get_static_folder(self.env._app)
+
+        return directory, item
+
+    def search_for_source(self, item):
+        if self.env.load_path:
+            # Note: With only env.directory set, we don't go to default;
+            # Setting env.directory only makes the output directory fixed.
+            return Resolver.search_for_source(self, item)
+        # Look in correct blueprint's directory
+        directory, item = self.split_prefix(item)
+        try:
+            return self.consider_single_directory(directory, item)
+        except IOError:
+            # XXX: Hack to make the tests pass, which are written to not
+            # expect an IOError upon missing files. They need to be rewritten.
+            return path.normpath(path.join(directory, item))
+
+    def resolve_output_to_path(self, target, bundle):
+        if self.env.config.get('directory'):
+            return Resolver.resolve_output_to_path(self, target, bundle)
+        # Allow targeting blueprint static folders
+        directory, rel_path = self.split_prefix(target)
+        return path.normpath(path.join(directory, rel_path))
+
+    def resolve_source_to_url(self, filepath, item):
+        if self.env.config.get('url'):
+            return url_prefix_join(self.env.url, item)
+
+        filename = item
+        if hasattr(self.env._app, 'blueprints'):
+            try:
+                blueprint, name = item.split('/', 1)
+                self.env._app.blueprints[blueprint] # keyerror if no module
+                endpoint = '%s.static' % blueprint
+                filename = name
+            except (ValueError, KeyError):
+                endpoint = 'static'
+        else:
+            # Module support for Flask < 0.7
+            try:
+                module, name = item.split('/', 1)
+                self.env._app.modules[module] # keyerror if no module
+                endpoint = '%s.static' % module
+                filename = name
+            except (ValueError, KeyError):
+                endpoint = '.static'
+
+        ctx = None
+        if not _request_ctx_stack.top:
+            ctx = self.env._app.test_request_context()
+            ctx.push()
+        try:
+            return url_for(endpoint, filename=filename)
+        finally:
+            if ctx:
+                ctx.pop()
+
+    def resolve_output_to_url(self, target):
+        # Behaves like the source directory
+        return self.resolve_source_to_url(None, target)
+
+
 class Environment(BaseEnvironment):
 
     config_storage_class = FlaskConfigStorage
+    resolver_class = FlaskResolver
 
     def __init__(self, app=None):
         self.app = app
@@ -122,53 +223,7 @@ class Environment(BaseEnvironment):
         raise RuntimeError('assets instance not bound to an application, '+
                             'and no application in current context')
 
-    def absurl(self, fragment):
-        if self.config.get('url') is not None:
-            # If a manual base url is configured, skip any
-            # blueprint-based auto-generation.
-            return super(Environment, self).absurl(fragment)
-        else:
-            try:
-                filename, query = fragment.split('?', 1)
-                query = '?' + query
-            except (ValueError):
-                filename = fragment
-                query = ''
 
-            if hasattr(self._app, 'blueprints'):
-                try:
-                    blueprint, name = filename.split('/', 1)
-                    self._app.blueprints[blueprint] # generates keyerror if no module
-                    endpoint = '%s.static' % blueprint
-                    filename = name
-                except (ValueError, KeyError):
-                    endpoint = 'static'
-            else:
-                # Module support for Flask < 0.7
-                try:
-                    module, name = filename.split('/', 1)
-                    self._app.modules[module] # generates keyerror if no module
-                    endpoint = '%s.static' % module
-                    filename = name
-                except (ValueError, KeyError):
-                    endpoint = '.static'
-
-            ctx = None
-            if not _request_ctx_stack.top:
-                ctx = self._app.test_request_context()
-                ctx.push()
-            try:
-                return url_for(endpoint, filename=filename) + query
-            finally:
-                if ctx:
-                    ctx.pop()
-
-    def abspath(self, path):
-        """Still needed to resolve the output path.
-        XXX: webassets needs to call _normalize_source_path
-        for this!
-        """
-        return self._normalize_source_path(path)
 
     # XXX: This is required because in a couple of places, webassets 0.6
     # still access env.directory, at one point even directly. We need to
@@ -185,29 +240,19 @@ class Environment(BaseEnvironment):
     """The base directory to which all paths will be relative to.
     """)
 
-    def _normalize_source_path(self, filename):
-        if path.isabs(filename):
-            return filename
-        if self.config.get('directory') is not None:
-            return super(Environment, self).abspath(filename)
-        try:
-            if hasattr(self._app, 'blueprints'):
-                blueprint, name = filename.split('/', 1)
-                directory = get_static_folder(self._app.blueprints[blueprint])
-                filename = name
-            else:
-                # Module support for Flask < 0.7
-                module, name = filename.split('/', 1)
-                directory = get_static_folder(self._app.modules[module])
-                filename = name
-        except (ValueError, KeyError):
-            directory = get_static_folder(self._app)
-        return path.abspath(path.join(directory, filename))
-
     def init_app(self, app):
         app.jinja_env.add_extension('webassets.ext.jinja2.AssetsExtension')
         app.jinja_env.assets_environment = self
 
+    def from_yaml(self, path):
+        """Register bundles from a YAML configuration file"""
+        bundles = YAMLLoader(path).load_bundles()
+        [self.register(name, bundle) for name, bundle in bundles.iteritems()]
+
+    def from_module(self, path):
+        """Register bundles from a Python module"""
+        bundles = PythonLoader(path).load_bundles()
+        [self.register(name, bundle) for name, bundle in bundles.iteritems()]
 
 try:
     from flaskext import script
@@ -215,19 +260,67 @@ except ImportError:
     pass
 else:
     import argparse
-    from webassets.script import GenericArgparseImplementation
+    from webassets.script import GenericArgparseImplementation, CommandError
 
     class CatchAllParser(object):
         def parse_known_args(self, app_args):
             return argparse.Namespace(), app_args
 
+    class FlaskArgparseInterface(GenericArgparseImplementation):
+        """Subclass the CLI implementation to add a --parse-templates option."""
+
+        def _construct_parser(self, *a, **kw):
+            super(FlaskArgparseInterface, self).\
+                _construct_parser(*a, **kw)
+            self.parser.add_argument(
+                '--parse-templates', action='store_true',
+                help='search project templates to find bundles')
+
+        def _setup_assets_env(self, ns, log):
+            env = super(FlaskArgparseInterface, self)._setup_assets_env(ns, log)
+            if env is not None:
+                if ns.parse_templates:
+                    log.info('Searching templates...')
+                    # Note that we exclude container bundles. By their very nature,
+                    # they are guaranteed to have been created by solely referencing
+                    # other bundles which are already registered.
+                    env.add(*[b for b in self.load_from_templates(env)
+                                    if not b.is_container])
+
+                if not len(env):
+                    raise CommandError(
+                        'No asset bundles were found. '
+                        'If you are defining assets directly within '
+                        'your templates, you want to use the '
+                        '--parse-templates option.')
+            return env
+
+        def load_from_templates(self, env):
+            from webassets.ext.jinja2 import Jinja2Loader, AssetsExtension
+            from flask import current_app as app
+
+            # Use the application's Jinja environment to parse
+            jinja2_env = app.jinja_env
+
+            # Get the template directories of app and blueprints
+            template_dirs = [path.join(app.root_path, app.template_folder)]
+            for blueprint in app.blueprints.values():
+                if blueprint.template_folder is None:
+                    continue
+                template_dirs.append(
+                    path.join(blueprint.root_path, blueprint.template_folder))
+
+            return Jinja2Loader(env, template_dirs, [jinja2_env]).load_bundles()
+
     class ManageAssets(script.Command):
         """Manage assets."""
         capture_all_args = True
 
-        def __init__(self, assets_env=None, impl=GenericArgparseImplementation):
+        def __init__(self, assets_env=None, impl=FlaskArgparseInterface,
+                     log=None):
             self.env = assets_env
             self.implementation = impl
+            self.log = log
 
         def create_parser(self, prog):
             return CatchAllParser()
@@ -250,6 +343,7 @@ else:
             import sys, os.path
             prog = '%s %s' % (os.path.basename(sys.argv[0]), sys.argv[1])
 
-            return self.implementation(self.env, prog=prog).main(args)
+            impl = self.implementation(self.env, prog=prog, log=self.log)
+            impl.main(args)
 
     __all__ = __all__ + ('ManageAssets',)
