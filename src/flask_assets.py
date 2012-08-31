@@ -12,11 +12,11 @@ __version__ = (0, 8, 'dev')
 __webassets_version__ = ('dev',) # webassets core compatibility. used in setup.py
 
 
-__all__ = ('Environment', 'Bundle',)
+__all__ = ('Environment', 'Bundle', 'ExternalAssets')
 
 
-# We want to expose this here.
-from webassets import Bundle
+# We want to expose these here.
+from webassets import Bundle, ExternalAssets
 
 
 class Jinja2Filter(Filter):
@@ -255,7 +255,7 @@ class Environment(BaseEnvironment):
         [self.register(name, bundle) for name, bundle in bundles.iteritems()]
 
 try:
-    from flaskext import script
+    from flask.ext import script
 except ImportError:
     pass
 else:
@@ -330,7 +330,6 @@ else:
             If ``self.env`` is not defined, it will import it from
             ``current_app``.
             """
-
             if not self.env:
                 from flask import current_app
                 self.env = current_app.jinja_env.assets_environment
