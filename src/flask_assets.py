@@ -210,7 +210,7 @@ class Environment(BaseEnvironment):
 
 
 try:
-    from flaskext import script
+    from flask.ext import script
 except ImportError:
     pass
 else:
