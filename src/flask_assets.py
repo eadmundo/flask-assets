@@ -17,6 +17,7 @@ __all__ = ('Environment', 'Bundle', 'ExternalAssets')
 
 # We want to expose these here.
 from webassets import Bundle, ExternalAssets
+from webassets.ext.jinja2 import webasset_tag
 
 
 class Jinja2Filter(Filter):
@@ -243,6 +244,7 @@ class Environment(BaseEnvironment):
     def init_app(self, app):
         app.jinja_env.add_extension('webassets.ext.jinja2.AssetsExtension')
         app.jinja_env.assets_environment = self
+        app.jinja_env.globals.update(webasset=webasset_tag)
 
     def from_yaml(self, path):
         """Register bundles from a YAML configuration file"""
